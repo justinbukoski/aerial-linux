@@ -362,7 +362,7 @@ fn read_bounded(reader: &mut impl Read, limit: u64) -> Result<Vec<u8>> {
 }
 
 /// Lightweight container gate, not a codec/decode verification. The renderer
-/// must still handle an unplayable movie and advance without a tight retry loop.
+/// must still handle an unplayable movie without a tight retry loop.
 fn open_regular(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
