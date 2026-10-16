@@ -3,10 +3,7 @@
 #[path = "../src/idle.rs"]
 mod idle;
 use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
-    },
+    sync::{atomic::AtomicBool, mpsc, Arc},
     time::{Duration, Instant},
 };
 
@@ -20,7 +17,5 @@ fn main() -> anyhow::Result<()> {
             println!("{:.3}s {event:?}", start.elapsed().as_secs_f64());
         }
     }
-    shutdown.store(true, Ordering::Relaxed);
-    let _ = worker.join();
-    Ok(())
+    idle::stop_worker(worker, &shutdown)
 }

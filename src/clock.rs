@@ -24,14 +24,16 @@ impl DesktopClock {
             .then(dirs::config_dir)
             .flatten()
             .map(|root| root.join("cosmic/com.system76.CosmicAppletTime/v1/military_time"));
-        Self {
+        let mut clock = Self {
             preference,
             checked_at: None,
             use_24h: false,
-        }
+        };
+        clock.refresh();
+        clock
     }
 
-    pub fn text(&mut self) -> String {
+    fn refresh(&mut self) {
         // Re-read while playing so a desktop setting change takes effect live.
         if self
             .checked_at
@@ -44,6 +46,10 @@ impl DesktopClock {
                 .unwrap_or(false);
             self.checked_at = Some(Instant::now());
         }
+    }
+
+    pub fn text(&mut self) -> String {
+        self.refresh();
         format_time(Local::now().time(), self.use_24h)
     }
 

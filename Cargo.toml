@@ -2,6 +2,7 @@
 name = "aerial-linux"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 license = "MIT"
 description = "Aerial screensaver for Linux and COSMIC, implemented in Rust"
 repository = "https://github.com/justinbukoski/aerial-linux"
@@ -29,7 +30,7 @@ zbus = { version = "5", default-features = false, features = ["blocking-api", "a
 tempfile = "3"
 
 [profile.dev]
-debug = false
+debug = 1
 
 [profile.release]
 strip = true

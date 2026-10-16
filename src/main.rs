@@ -159,6 +159,7 @@ impl Session {
             "/org/freedesktop/login1",
             "org.freedesktop.login1.Manager",
         )?;
+        // SAFETY: getuid takes no pointers and reads this process's UID.
         let user_path: OwnedObjectPath = manager.call("GetUser", &(unsafe { libc::getuid() },))?;
         let user = Proxy::new(
             &bus,
@@ -196,7 +197,31 @@ fn control(paths: &Paths, command: &str) -> Result<Value> {
     BufReader::new(stream)
         .take(128 * 1024)
         .read_line(&mut response)?;
-    Ok(serde_json::from_str(&response)?)
+    let response: Value = serde_json::from_str(&response)?;
+    if let Some(error) = response.get("error").and_then(Value::as_str) {
+        bail!("Watcher rejected command: {error}")
+    }
+    Ok(response)
+}
+
+fn watcher_absent(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+        })
+    })
+}
+
+fn validated_command(command: &str) -> Result<String> {
+    let words: Vec<_> = command.split_whitespace().collect();
+    match words.as_slice() {
+        ["show" | "hide" | "quit" | "status"] => Ok(words[0].to_owned()),
+        ["preview", seconds] => Ok(format!("preview {}", seconds.parse::<u64>()?.clamp(1, 600))),
+        _ => bail!("Unknown or empty control command"),
+    }
 }
 
 fn cached(paths: &Paths, catalog: &Catalog) -> Vec<(Video, PathBuf)> {
@@ -226,6 +251,7 @@ fn watch(paths: &Paths, idle_seconds: u64, preview: Option<u64>) -> Result<()> {
         .truncate(false)
         .write(true)
         .open(paths.runtime.join("watcher.lock"))?;
+    // SAFETY: lock owns a live descriptor; flock borrows it without taking ownership.
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         bail!("Aerial watcher is already running")
     }
@@ -250,6 +276,8 @@ fn watch(paths: &Paths, idle_seconds: u64, preview: Option<u64>) -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
     let idle_thread = idle::spawn_idle(Duration::from_secs(idle_seconds), tx, shutdown.clone())?;
+    // SAFETY: the C ABI handlers only store to a lock-free atomic flag. Their
+    // lifetime is static and the cast matches Linux's signal-handler ABI.
     unsafe {
         libc::signal(
             libc::SIGTERM,
@@ -290,16 +318,22 @@ fn watch(paths: &Paths, idle_seconds: u64, preview: Option<u64>) -> Result<()> {
                 }
             }
             let mut client = None;
+            let mut client_error = None;
             match listener.accept() {
                 Ok((stream, _)) => {
                     stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+                    stream.set_write_timeout(Some(Duration::from_millis(200)))?;
                     let mut command = String::new();
-                    if BufReader::new(stream.try_clone()?)
+                    match BufReader::new(stream.try_clone()?)
                         .take(256)
                         .read_line(&mut command)
-                        .is_ok()
                     {
-                        pending = Some(command.trim().to_owned());
+                        Ok(_) => match validated_command(&command) {
+                            Ok(command) if command != "status" => pending = Some(command),
+                            Ok(_) => {} // Status must not cancel a queued idle activation.
+                            Err(error) => client_error = Some(error.to_string()),
+                        },
+                        Err(error) => client_error = Some(error.to_string()),
                     }
                     client = Some(stream);
                 }
@@ -365,7 +399,7 @@ fn watch(paths: &Paths, idle_seconds: u64, preview: Option<u64>) -> Result<()> {
                 let _ = writeln!(
                     stream,
                     "{}",
-                    json!({"running":true,"idle_seconds":idle_seconds,"playback":state})
+                    json!({"running":true,"idle_seconds":idle_seconds,"playback":state,"error":client_error})
                 );
             }
             if quitting {
@@ -401,11 +435,10 @@ fn watch(paths: &Paths, idle_seconds: u64, preview: Option<u64>) -> Result<()> {
         Ok(())
     })();
     players.take();
-    shutdown.store(true, Ordering::Relaxed);
-    let _ = idle_thread.join();
+    let worker_outcome = idle::stop_worker(idle_thread, &shutdown);
     let _ = fs::remove_file(socket_path);
     log(&mut logger, "watcher stopped; owned players reaped");
-    outcome
+    outcome.and(worker_outcome)
 }
 
 fn avoid_repeat(videos: &mut [(Video, PathBuf)], last: Option<&str>) {
@@ -516,19 +549,26 @@ fn main() -> Result<()> {
         Command::Hide => println!("{}", control(&paths, "hide")?),
         Command::Status => match control(&paths, "status") {
             Ok(state) => println!("{}", serde_json::to_string_pretty(&state)?),
-            Err(_) => println!("{}", json!({"running":false})),
+            Err(error) if watcher_absent(&error) => println!("{}", json!({"running":false})),
+            Err(error) => return Err(error),
         },
         Command::Quit => {
             println!("{}", control(&paths, "quit")?);
         }
         Command::InstallAutostart => install_autostart(&paths)?,
         Command::Disable => {
-            let _ = control(&paths, "quit");
+            let stopped = control(&paths, "quit");
             let path = dirs::config_dir()
                 .context("No config directory")?
                 .join("autostart/aerial-linux.desktop");
             if path.exists() {
                 fs::remove_file(path)?;
+            }
+            if let Err(error) = stopped {
+                if !watcher_absent(&error) {
+                    return Err(error)
+                        .context("Startup removed, but could not confirm watcher stopped");
+                }
             }
             println!("Automatic startup disabled.");
         }
@@ -542,6 +582,19 @@ mod tests {
     #[test]
     fn default_idle_is_five_minutes() {
         assert_eq!(Config::default().idle_seconds, 300);
+    }
+    #[test]
+    fn control_commands_are_validated_without_losing_status_semantics() {
+        for invalid in ["", "preview nope", "preview", "preview 1 extra", "unknown"] {
+            assert!(validated_command(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(validated_command(" status \n").unwrap(), "status");
+        assert_eq!(validated_command("preview 9999").unwrap(), "preview 600");
+        assert_eq!(validated_command("preview 0").unwrap(), "preview 1");
+        assert!(!watcher_absent(&anyhow::anyhow!("malformed response")));
+        assert!(watcher_absent(
+            &std::io::Error::from(std::io::ErrorKind::NotFound).into()
+        ));
     }
     #[test]
     fn empty_repeat_avoidance_is_safe() {

@@ -15,6 +15,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, Cursor, Read, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Component, Path, PathBuf},
     time::Duration,
 };
@@ -31,6 +32,7 @@ pub enum Resolution {
     #[default]
     Sdr4k,
     Hd1080,
+    Hd1080Sdr,
 }
 
 impl Resolution {
@@ -38,6 +40,7 @@ impl Resolution {
         match self {
             Self::Sdr4k => "4k-sdr",
             Self::Hd1080 => "1080p-h264",
+            Self::Hd1080Sdr => "1080p-sdr",
         }
     }
 }
@@ -65,7 +68,6 @@ impl Video {
             .iter()
             .rev()
             .find(|p| p.seconds <= seconds)
-            .or_else(|| self.poi.first())
             .map(|p| p.text.as_str())
             .unwrap_or(&self.name)
     }
@@ -113,7 +115,7 @@ impl Catalog {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+        let mut file = open_regular(path)?;
         let bytes = read_bounded(&mut file, MAX_FEED_BYTES)?;
         let mut catalog: Self = serde_json::from_slice(&bytes).context("decode cached catalog")?;
         catalog.validate()?;
@@ -173,7 +175,7 @@ impl Catalog {
         drop(file);
         ensure!(
             valid_movie(&partial.0)?,
-            "download is not a complete movie container"
+            "download failed the movie container header/size check"
         );
         fs::rename(&partial.0, &path).context("publish cached video")?;
         Ok(path)
@@ -230,11 +232,16 @@ impl Catalog {
                 Resolution::Sdr4k => [
                     (asset.sdr4k.as_deref(), Resolution::Sdr4k),
                     (asset.h264.as_deref(), Resolution::Hd1080),
-                    (asset.hd_sdr.as_deref(), Resolution::Hd1080),
+                    (asset.hd_sdr.as_deref(), Resolution::Hd1080Sdr),
                 ],
                 Resolution::Hd1080 => [
                     (asset.h264.as_deref(), Resolution::Hd1080),
-                    (asset.hd_sdr.as_deref(), Resolution::Hd1080),
+                    (asset.hd_sdr.as_deref(), Resolution::Hd1080Sdr),
+                    (asset.sdr4k.as_deref(), Resolution::Sdr4k),
+                ],
+                Resolution::Hd1080Sdr => [
+                    (asset.hd_sdr.as_deref(), Resolution::Hd1080Sdr),
+                    (asset.h264.as_deref(), Resolution::Hd1080),
                     (asset.sdr4k.as_deref(), Resolution::Sdr4k),
                 ],
             };
@@ -356,22 +363,38 @@ fn read_bounded(reader: &mut impl Read, limit: u64) -> Result<Vec<u8>> {
 
 /// Lightweight container gate, not a codec/decode verification. The renderer
 /// must still handle an unplayable movie and advance without a tight retry loop.
-fn valid_movie(path: &Path) -> Result<bool> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(value) => value,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
+fn open_regular(path: &Path) -> Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
     ensure!(
-        !metadata.file_type().is_symlink(),
-        "cache file is a symlink"
+        file.metadata()?.is_file(),
+        "cache entry must be a regular file"
     );
+    Ok(file)
+}
+
+fn valid_movie(path: &Path) -> Result<bool> {
+    let mut file = match open_regular(path) {
+        Ok(file) => file,
+        Err(error)
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|io| io.kind() == io::ErrorKind::NotFound) =>
+        {
+            return Ok(false)
+        }
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() <= MIN_VIDEO_BYTES || metadata.len() > MAX_VIDEO_BYTES
     {
         return Ok(false);
     }
     let mut header = [0_u8; 8];
-    File::open(path)?.read_exact(&mut header)?;
+    file.read_exact(&mut header)?;
     Ok(matches!(
         &header[4..8],
         b"ftyp" | b"moov" | b"mdat" | b"wide" | b"free"
@@ -528,5 +551,30 @@ mod tests {
         bytes[4..8].copy_from_slice(b"ftyp");
         fs::write(&movie, bytes).unwrap();
         assert!(valid_movie(&movie).unwrap());
+    }
+    #[test]
+    fn hd_formats_have_distinct_cache_keys_and_intro_uses_asset_name() {
+        let mut v = video("A1");
+        v.resolution = Resolution::Hd1080;
+        let h264 = Catalog::cache_path(Path::new("/cache"), &v).unwrap();
+        v.resolution = Resolution::Hd1080Sdr;
+        assert_ne!(h264, Catalog::cache_path(Path::new("/cache"), &v).unwrap());
+        v.poi = vec![Poi {
+            seconds: 10.0,
+            text: "Later".into(),
+        }];
+        assert_eq!(v.caption_at(0.0), "Coast");
+        assert_eq!(v.caption_at(10.0), "Later");
+    }
+    #[test]
+    fn cache_reads_reject_symlinks_and_special_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("catalog.json");
+        fs::write(&file, "{}").unwrap();
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(open_regular(&link).is_err());
+        assert!(open_regular(temp.path()).is_err());
+        assert!(!valid_movie(&temp.path().join("missing.mov")).unwrap());
     }
 }

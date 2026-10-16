@@ -225,8 +225,7 @@ impl PlayerGroup {
                 if event.get("event").and_then(Value::as_str) == Some("end-file")
                     && event.get("reason").and_then(Value::as_str) == Some("error")
                 {
-                    eprintln!("mpv playback failed on {}: {}", player.output, event);
-                    return Ok(false);
+                    bail!("mpv playback failed on {}: {}", player.output, event);
                 }
                 if event.get("event").and_then(Value::as_str) != Some("property-change") {
                     continue;
@@ -265,11 +264,7 @@ impl PlayerGroup {
             } else {
                 ""
             };
-            let overlay = overlay_ass(
-                caption,
-                clock_text.as_deref(),
-                player.clock_slot,
-            );
+            let overlay = overlay_ass(caption, clock_text.as_deref(), player.clock_slot);
             if overlay != player.overlay {
                 ipc.queue(
                     json!({"command": ["osd-overlay", 1, "ass-events", overlay, 1920, 1080]}),
@@ -283,7 +278,7 @@ impl PlayerGroup {
 
     /// Local status only: useful for confirming position advances per output.
     pub fn status(&self) -> Value {
-        json!({"backend": APP, "clock": self.clock, "clock_format": self.desktop_clock.format_name(), "captions": self.captions, "players": self.players.iter().map(|player| json!({
+        json!({"backend": APP, "clock": self.clock, "clock_format": self.clock.then(|| self.desktop_clock.format_name()), "captions": self.captions, "players": self.players.iter().map(|player| json!({
             "pid": player.child.id(), "output": player.output, "socket": player.socket,
             "connected": player.ipc.is_some(), "path": player.path,
             "position": player.position, "duration": player.duration, "hwdec": player.hwdec,
@@ -402,7 +397,7 @@ impl Ipc {
         // Bound work even if a malfunctioning child emits unlimited events.
         for _ in 0..16 {
             match self.stream.read(&mut chunk) {
-                Ok(0) => break,
+                Ok(0) => bail!("mpv IPC closed while reading"),
                 Ok(count) => self.incoming.extend_from_slice(&chunk[..count]),
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
@@ -414,12 +409,18 @@ impl Ipc {
             );
         }
         let mut events = Vec::new();
-        while let Some(end) = self.incoming.iter().position(|byte| *byte == b'\n') {
-            if let Ok(value) = serde_json::from_slice(&self.incoming[..end]) {
-                events.push(value);
-            }
-            self.incoming.drain(..=end);
+        let mut consumed = 0;
+        while let Some(end) = self.incoming[consumed..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        {
+            let end = consumed + end;
+            let value = serde_json::from_slice(&self.incoming[consumed..end])
+                .context("malformed mpv IPC event")?;
+            events.push(value);
+            consumed = end + 1;
         }
+        self.incoming.drain(..consumed);
         Ok(events)
     }
 }
@@ -634,5 +635,18 @@ mod tests {
             serde_json::from_slice::<Value>(&data[..count]).unwrap()["command"][0],
             "quit"
         );
+    }
+    #[test]
+    fn closed_ipc_is_a_failure_instead_of_a_frozen_overlay() {
+        let (a, b) = UnixStream::pair().unwrap();
+        a.set_nonblocking(true).unwrap();
+        let mut ipc = Ipc {
+            stream: a,
+            incoming: vec![],
+            outgoing: VecDeque::new(),
+            written: 0,
+        };
+        drop(b);
+        assert!(ipc.poll().is_err());
     }
 }

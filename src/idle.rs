@@ -65,6 +65,21 @@ fn timeout_millis(timeout: Duration) -> Result<u32> {
     u32::try_from(millis).context("idle timeout exceeds Wayland's 32-bit millisecond limit")
 }
 
+/// Stop the worker without letting a stuck connection trap application exit.
+pub fn stop_worker(worker: JoinHandle<()>, shutdown: &AtomicBool) -> Result<()> {
+    shutdown.store(true, Ordering::Relaxed);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !worker.is_finished() {
+        if Instant::now() >= deadline {
+            bail!("Wayland idle worker did not stop within two seconds");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    worker
+        .join()
+        .map_err(|_| anyhow!("Wayland idle worker panicked"))
+}
+
 struct Seat {
     global: u32,
     proxy: wl_seat::WlSeat,
@@ -115,6 +130,9 @@ fn discover(
                 bail!("Wayland registry discovery timed out");
             }
             pump(connection, &mut queue, &mut state)?;
+            if let Some(reason) = state.failure.take() {
+                bail!(reason);
+            }
         }
     }
     Ok(Some((queue, state)))
@@ -378,5 +396,11 @@ mod tests {
             u32::MAX
         );
         assert!(timeout_millis(Duration::from_millis(u64::from(u32::MAX) + 1)).is_err());
+    }
+    #[test]
+    fn worker_panics_are_reported() {
+        let shutdown = AtomicBool::new(false);
+        assert!(stop_worker(thread::spawn(|| panic!("test worker")), &shutdown).is_err());
+        assert!(shutdown.load(Ordering::Relaxed));
     }
 }

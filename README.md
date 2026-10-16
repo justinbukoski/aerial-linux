@@ -18,7 +18,7 @@ This is a visual screensaver, not a screen locker. Keep your desktop's normal lo
 
 ## Build and install
 
-Install a current stable [Rust toolchain](https://rustup.rs/), Git and Flatpak through your distribution. From your desktop session:
+Install a [Rust toolchain](https://rustup.rs/) (1.89 or later), Git and Flatpak through your distribution. From your desktop session:
 
 ```sh
 flatpak install --user flathub io.mpv.Mpv
