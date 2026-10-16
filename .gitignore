@@ -1,0 +1,8 @@
+/target/
+*.part
+*.mov
+*.mp4
+*.zip
+*.tar
+*.log
+/evidence/raw/
