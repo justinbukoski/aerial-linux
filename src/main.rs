@@ -406,10 +406,21 @@ fn watch(paths: &Paths, idle_seconds: u64, preview: Option<u64>) -> Result<()> {
                 break;
             }
             if let Some(group) = players.as_mut() {
-                if !group.tick()? {
-                    players.take();
-                    deadline = None;
-                    log(&mut logger, "dismissed player-exit");
+                match group.tick() {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        players.take();
+                        deadline = None;
+                        log(&mut logger, "dismissed player-exit");
+                    }
+                    Err(error) => {
+                        // IPC may close just before a quitting child is reaped.
+                        // Stop this activation, keep idle monitoring available,
+                        // and wait for a fresh idle/preview request before retry.
+                        players.take();
+                        deadline = None;
+                        log(&mut logger, format!("playback stopped: {error:#}"));
+                    }
                 }
             }
             if players.is_some() && last_session_check.elapsed() >= Duration::from_millis(500) {
