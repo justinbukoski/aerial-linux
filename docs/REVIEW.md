@@ -7,3 +7,9 @@ Confirmed fixes include validated control commands, status queries that preserve
 The COSMIC clock-format addition received a separate three-file review. A further 11-file review of the fixes found a playback-error propagation regression and a CI matrix setting; both were corrected. A failed player now ends that activation and logs the error while the idle watcher remains available for the next request, without immediately retrying a corrupt file.
 
 Validation includes 22 unit tests on native Linux and Rust 1.89, Clippy with warnings denied, formatting and a release build. CI repeats the checks on Rust 1.89 and stable. Desktop behavior still requires live validation; the README states the tested compositor and current limitations. Model review is additional evidence, not proof of absence of defects.
+
+Live COSMIC verification also confirmed 12h → 24h changes during playback,
+clock movement on video rotation, captions off, malformed-control survival,
+watcher survival after a player quits, and Escape dismissal. Hardware decoding
+used VA-API with zero dropped frames during the check. The README screenshot
+shows the running app with its 24-hour clock.
