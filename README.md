@@ -5,7 +5,7 @@ A native Rust screensaver for Wayland, inspired by [Aerial for macOS](https://gi
 ![Aerial playing on a Wayland desktop](docs/preview.jpg)
 
 - Shuffled video rotation, with no immediate repeat between activations.
-- Clock cycles through eight positions. Location captions are off by default.
+- Clock cycles through eight positions and follows COSMIC's 12/24-hour preference. Location captions are off by default.
 - Native Wayland idle detection; keyboard or pointer activity dismisses automatic playback.
 - Respects compositor idle inhibitors and checks logind session activity and lock state.
 - Offline playback through sandboxed mpv. No Python runtime required by the app.
@@ -56,7 +56,7 @@ aerial-linux watch
 {"idle_seconds":300,"clock":true,"captions":false}
 ```
 
-Restart the watcher after editing the file. XDG directory overrides are respected.
+Restart the watcher after editing the file. XDG directory overrides are respected. On COSMIC, changes to the desktop's 12/24-hour clock setting are picked up during playback within one second. Other desktops currently use 12-hour time.
 
 ```sh
 aerial-linux status                 # watcher, video and decoder status

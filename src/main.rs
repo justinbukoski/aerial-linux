@@ -1,4 +1,5 @@
 mod catalog;
+mod clock;
 mod idle;
 mod playback;
 

@@ -1,7 +1,6 @@
 //! Offline, owned mpv playback. Only children started by this module are stopped.
 use crate::catalog::Video;
 use anyhow::{bail, ensure, Context, Result};
-use chrono::Local;
 use serde_json::{json, Value};
 use std::{
     collections::VecDeque,
@@ -40,6 +39,7 @@ pub struct PlayerGroup {
     videos: Vec<(Video, PathBuf)>,
     clock: bool,
     captions: bool,
+    desktop_clock: crate::clock::DesktopClock,
     started: Instant,
 }
 
@@ -122,6 +122,7 @@ impl PlayerGroup {
             videos: checked,
             clock,
             captions,
+            desktop_clock: crate::clock::DesktopClock::new(),
             started: Instant::now(),
         };
         for (index, output) in outputs.iter().enumerate() {
@@ -170,6 +171,7 @@ impl PlayerGroup {
 
     /// Returns false as soon as any owned player exits (including user input).
     pub fn tick(&mut self) -> Result<bool> {
+        let clock_text = self.clock.then(|| self.desktop_clock.text());
         for player in &mut self.players {
             if player.exited || player.child.try_wait()?.is_some() {
                 player.exited = true;
@@ -265,9 +267,7 @@ impl PlayerGroup {
             };
             let overlay = overlay_ass(
                 caption,
-                self.clock
-                    .then(|| Local::now().format("%-I:%M %p").to_string())
-                    .as_deref(),
+                clock_text.as_deref(),
                 player.clock_slot,
             );
             if overlay != player.overlay {
@@ -283,7 +283,7 @@ impl PlayerGroup {
 
     /// Local status only: useful for confirming position advances per output.
     pub fn status(&self) -> Value {
-        json!({"backend": APP, "clock": self.clock, "captions": self.captions, "players": self.players.iter().map(|player| json!({
+        json!({"backend": APP, "clock": self.clock, "clock_format": self.desktop_clock.format_name(), "captions": self.captions, "players": self.players.iter().map(|player| json!({
             "pid": player.child.id(), "output": player.output, "socket": player.socket,
             "connected": player.ipc.is_some(), "path": player.path,
             "position": player.position, "duration": player.duration, "hwdec": player.hwdec,
